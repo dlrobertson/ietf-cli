@@ -7,16 +7,19 @@ from optparse import OptionParser
 from os import chdir, environ, link, listdir, mkdir, system, unlink
 from os.path import basename, exists as pathexists, expanduser, isdir, join as pathjoin
 from pdb import set_trace as trace
-from re import compile, search
+from pickle import dump as pickledump, load as pickleload
+from re import compile, search, sub
 from subprocess import Popen, PIPE
 from sys import argv, excepthook
 from time import strftime
+from xml.etree import ElementTree as ElTree
 
 '''
 Program to help command-line users have better access to IETF-related documents
    See help text below.
 '''
-__version__ = "1.1"
+__version__ = "1.3"
+__license__ = "http://en.wikipedia.org/wiki/WTFPL"
 
 # Version history:
 #  1.0
@@ -24,19 +27,30 @@ __version__ = "1.1"
 #  1.1
 #    Added bcp
 #    Split out the command-calling in the CLI to make it clearer
+#  1.2
+#    Added more places to look for the config file
+#    Fixed help text for "charter" to make wildcard use clearer
+#    Added auth48
+#  1.3
+#    Added the WTFPL license
+#    Added parsing the RFC Editor's database during mirror
+#    "rfc" now shows some information from the RFC Editor's database
+#    "rfc" now opens RFCs that replace the requested RFC
+#    "rfc" now opens the errata page for the requested RFC if the database says there is errata
 
 ##########
 # Utility functions and definitions
 ##########
 
-KnownCmds = ("bcp", "charter", "diff", "draft", "mirror", "rfc", "tools", "tracker")
-ConfigPlaces = ("~/bin/ietf.config", "/usr/local/bin/ietf.config")
+KnownCmds = ("auth48", "bcp", "charter", "diff", "draft", "mirror", "rfc", "tools", "tracker")
+ConfigPlaces = ("~/bin/ietf.config", "/usr/local/bin/ietf.config", "/etc", "~/.ietf")
 WasPublishedPatt = compile(r"was\s*published")
 NewRequestPatt = compile(r"new\s*Request\s*for\s*Comments")
 HasExpiredPatt = compile(r"has\s*expired")
 HasBeenReplacedPatt = compile(r"has\s*been\s*replaced")
 RFCNamePatt = compile(r"RFC\s*(\d\d\d\d)")
 AnotherDocPatt = compile(r"another\s*document,\s*(draft-.*),")
+RFCZerosPat = compile(r'^0+(.*)')
 
 # Make a block of text that can be executed in the CLI
 CLICmdCode = ""
@@ -52,22 +66,18 @@ def help_REPLTHISCMD(self):
 # Given a draft's filename, display it if it s a full draft but not otherwise
 def ShowDraft(filename):
 	ThisBaseName = basename(filename)
-	TheDiffs = glob(pathjoin(FullRFCDir, "authors", "*-diff.html"))
-	for ThisDiff in TheDiffs:
-		try:
-			InText = open(ThisDiff, "r").read()
-		except:
-			exit("Weird: could not read '" + ThisDiff + "' even though it exists. Exit.")
-		if InText.find("<strike><font color='red'>" + ThisBaseName) > -1:
-			print("This Internet-Draft is in AUTH48 state; see " + ThisDiff)
-			break
+	# See if this draft is in AUTH48
+	ThisAuth48 = FindDraftInAuth48(ThisBaseName)
+	if ThisAuth48 != "":
+		print("This Internet-Draft is in AUTH48 state; displaying " + ThisAuth48)
+		WebDisplay("file:///", pathjoin(FullRFCDir, "authors", ThisAuth48 + "diff.html"))
 	# If tombstones are to be displayed, display this file regardless
 	if DisplayTombstones:
 		system(DisplayTextCommand + filename)
 	else:
 		# Read in the whole file
 		try:
-			AllLines = open(filename, "r").readlines()
+			AllLines = open(filename, mode="r").readlines()
 		except:
 			print("Weird: could not open " + filename + " for reading. Skipping.")
 		# Get the first three lines of the file, and concatenate them with a space between
@@ -96,6 +106,18 @@ def ShowDraft(filename):
 				pass # There are probably many cases where this string isn't found; ignore them
 		else:
 			system(DisplayTextCommand + filename)
+
+# Find a draft in the in-notes/authors directory, return "rfc1234" or ""
+def FindDraftInAuth48(basename):
+	TheDiffs = glob(pathjoin(FullRFCDir, "authors", "*-diff.html"))
+	for ThisDiff in TheDiffs:
+		try:
+			InText = open(ThisDiff, mode="r").read()
+		except:
+			exit("Weird: could not read '" + ThisDiff + "' even though it exists. Exit.")
+		if InText.find("<strike><font color='red'>" + basename) > -1:
+			return(ThisDiff.replace(pathjoin(FullRFCDir, "authors", ""), "").replace("-diff.html", ""))
+	return("")  # Only here if there was no file in AUTH48
 
 # Open a URL in the browser, but give a warning in the terminal if the command is "less"
 def WebDisplay(TheURL, TheArg):
@@ -161,13 +183,17 @@ def CheckHelp(TheCaller, InArgs):
 		return False
 
 HelpText = {
+	"auth48": '''auth48:
+    Takes a list of RFC numbers or draft names, determines if there are AUTH48
+    files associated with them, and displays the various files.''',
 	"bcp": '''bcp:
     Takes a list of BCP numbers. Displays the BCP RFCs found using the text
     dispay program. You can also give 'index' as an argument to see
     bcp-index.txt.''',
 	"charter": '''charter:
     Takes a list of WG names. Displays the charter for each WG using the text
-    dispay program. Wildcards are allowed in the charter names.''',
+    dispay program. Wildcards are appended to the beginning and end of the
+    charter name given, and can also be given in the name.''',
 	"diff": '''diff:
     Takes a draft name (with or without the '-nn' version number or '.txt'
     and displays the HTML diff between it and the preceding version on the
@@ -186,7 +212,9 @@ HelpText = {
     dispay program. You do not need to give 'rfc' or '.txt' in the file
     names. You can also give 'index' as an argument to see rfc-index.txt.
     This command searches both the main RFC directory and the pre-publication
-    (AUTH48) directory.''',
+    (AUTH48) directory. It will automatically open RFCs that update the one
+    given, and will open errata in the browser if the RFC Editor's database
+    indicates that such errata exists.''',
 	"tools": '''tools:
     Takes a list of draft file names, RFC names, and/or WG names. Displays the
     result from the IETF Tools pages in the web dispay program. Draft names
@@ -219,6 +247,44 @@ HelpText["allshellcmds"] = AllShellHelp
 ##########
 # The commands themselves
 ##########
+
+### auth48 -- Open all appropriate files for a doc in AUTH48
+def Cmd_auth48(Args):
+	if CheckHelp("auth48", Args): return
+	if Args[0] == "":
+		print("Must give at least one draft name or RFC name; skipping.")
+		return
+	def ShowAuth48s(RFCfile):
+		# Incoming file is in format "rfc1234"
+		# Open the text file
+		system(DisplayTextCommand + pathjoin(FullRFCDir, "authors", RFCfile + ".txt"))
+		# Open the local diff in the browser 
+		WebDisplay("file:///", pathjoin(FullRFCDir, "authors", RFCfile + "-diff.html"))
+		# Show the status on the RFC Editor's site
+		WebDisplay("http://www.rfc-editor.org/auth48/", RFCfile)
+	for ThisArg in Args:
+		# If it is just a number, check for the RFC
+		if ThisArg.isdigit():
+			if pathexists(pathjoin(FullRFCDir, "authors", "rfc" + ThisArg + ".txt")):
+				ShowAuth48s("rfc" + ThisArg)
+			else:
+				print("You specified an all-digit argument, '" + ThisArg + "', but a corresponding RFC doesn't " \
+					+ "exist in the AUTH48 directory. Skipping.")
+		elif ((ThisArg[0:3] == "rfc") and (ThisArg[3:7].isdigit())):
+			if pathexists(pathjoin(FullRFCDir, "authors", "rfc" + ThisArg[3:7] + ".txt")):
+				ShowAuth48s("rfc" + ThisArg[3:7])
+			else:
+				print("You specified 'rfc' and some digits, but a corresponding RFC doesn't " \
+					+ "exist in the AUTH48 directory. Skipping.")
+		elif ThisArg.startswith("draft-"):
+			ThisBaseName = basename(ThisArg)
+			ThisAuth48 = FindDraftInAuth48(ThisBaseName)
+			if ThisAuth48 != "":
+				ShowAuth48s(ThisAuth48)
+			else:
+				print("You gave a draft name, but that draft doesn't have an AUTH48 RFC associated with it. Skipping.")
+		else:
+			print("Didn't recognize the argument '" + ThisArg + "'. Skipping.")
 
 ### bcp -- Open BCPs locally
 def Cmd_bcp(Args):
@@ -382,6 +448,7 @@ def Cmd_mirror(Args):
 			if ThisLine == "\n": continue
 			TheOut += ThisLine
 		PrintLog(TheOut)
+
 	# Do the filling of the short-name directory
 	PrintLog("Filling short-name directory")
 	FullIDDir = expanduser(IDDir)
@@ -426,6 +493,37 @@ def Cmd_mirror(Args):
 			link(pathjoin(FullIDDir, ThisDraftName), pathjoin(FullShortIDDir, ShorterName))
 		except OSError as e:
 			print("For '" + ThisDraftName + "', got error: " + str(e) + ". Skipping.")
+
+	# Make the pickled RFC status database to make rfc status searching faster
+	PrintLog("Making the RFC status index")
+	TagBase = "{http://www.rfc-editor.org/rfc-index}"
+	try:
+		ParsedRFCDB = ElTree.parse(pathjoin(FullRFCDir, "rfc-index.xml"))
+	except:
+		exit("Weird: could not find '" + pathjoin(FullRFCDir, "rfc-index.xml") + "' when building the status index. Exiting.")
+	TreeRoot = ParsedRFCDB.getroot()
+	RFCStatus = {}
+	def StripLeadingZeros(InStr):
+		return(sub(RFCZerosPat, "\\1", InStr))
+	for ThisTopNode in TreeRoot:
+		if ThisTopNode.tag == TagBase + "rfc-entry":
+			ThisRFCNum = StripLeadingZeros(ThisTopNode.find(TagBase + "doc-id").text.replace("RFC", ""))
+			RFCStatus[ThisRFCNum] = {}
+			for ThisLookedFor in ("obsoletes", "obsoleted-by", "updates", "updated-by"):
+				if ThisTopNode.findall(TagBase + ThisLookedFor):
+					RFCStatus[ThisRFCNum][ThisLookedFor] = []
+					for ThisFoundItem in ThisTopNode.findall(TagBase + ThisLookedFor):
+						RFCStatus[ThisRFCNum][ThisLookedFor].append(StripLeadingZeros(ThisFoundItem.find(TagBase + "doc-id").text.replace("RFC", "")))
+			if ThisTopNode.findall(TagBase + "draft"):
+				RFCStatus[ThisRFCNum]["draft"] = ThisTopNode.find(TagBase + "draft").text
+			if ThisTopNode.findall(TagBase + "errata-url"):
+				RFCStatus[ThisRFCNum]["errata"] = True
+	try:
+		with open(RFCStatusFileLoc, mode="wb") as statusf:
+			pickledump(RFCStatus, statusf)
+	except:
+		exit("Could not dump status info to '" + RFCStatusFileLoc + "'. Exiting.")
+
 	# Finish up
 	PrintLog("\nMirror ended at " + strftime("%Y-%m-%d %H:%M:%S"))
 	logf.close()
@@ -436,12 +534,36 @@ def Cmd_rfc(Args):
 	if Args[0] == "":
 		print("Must give at least one RFC name or numnber; skipping.")
 		return
+	# Open the status database before going through the arguments
+	try:
+		with open(RFCStatusFileLoc, mode="r") as statusf:
+			RFCStatusDB = pickleload(statusf)
+	except:
+		exit("Weird: could not get data from the RFC status database, '" + RFCStatusFileLoc + "'. Exiting.")
 	for ThisArg in Args:
 		# Special case: 'index' returns the rfc-index.txt file
 		if ThisArg == "index":
 			system(DisplayTextCommand + pathjoin(FullRFCDir, "rfc-index.txt"))
 		else:
+			# Get the status of the RFC
+			ThisRFCStatus = RFCStatusDB[ThisArg]
+			if ThisRFCStatus.get("obsoletes"):
+				print(ThisArg + " obsoletes " + ", ".join(ThisRFCStatus.get("obsoletes")))
+			if ThisRFCStatus.get("obsoleted-by"):
+				print(ThisArg + " is obsoleted by " + ", ".join(ThisRFCStatus.get("obsoleted-by")))
+				print("  Also opening "+ ", ".join(ThisRFCStatus.get("obsoleted-by")))
+				Cmd_rfc(ThisRFCStatus.get("obsoleted-by"))
+			if ThisRFCStatus.get("updates"):
+				print(ThisArg + " updates " + ", ".join(ThisRFCStatus.get("updates")))
+			if ThisRFCStatus.get("updated-by"):
+				print(ThisArg + " is updated by " + ", ".join(ThisRFCStatus.get("updated-by")))
+			if ThisRFCStatus.get("draft"):
+				print(ThisArg + " came from " + ThisRFCStatus.get("draft"))
+			if ThisRFCStatus.get("errata"):
+				print(ThisArg + " has errata, which is being opened in the browser")
+				WebDisplay("http://www.rfc-editor.org/errata_search.php?rfc=", ThisArg)
 			RFCTests = [ ThisArg, ThisArg + ".txt", "rfc" + ThisArg, "rfc" + ThisArg + ".txt" ]
+			# Find the RFC files
 			FoundRFC = False
 			for ThisTest in RFCTests:
 				# Also check in the AUTH48 directory
@@ -527,7 +649,7 @@ if ConfigFile == "":
 
 # Get the variable names for the directories and display mechanisms
 try:
-	Configs = open(expanduser(ConfigFile), "r").read()
+	Configs = open(expanduser(ConfigFile), mode="r").read()
 except:
 	exit("Could not open '" + expanduser(ConfigFile) + "' for input. Exiting.")
 try:
@@ -554,6 +676,9 @@ if DisplayTextCommand == "":
 		DisplayTextCommand = "less "
 if DisplayWebCommand == "":
 	DisplayWebCommand = "less "  # This is a terrible fallback, of course
+
+# Location of the RFC Status file (which could not be complete until we got the config)
+RFCStatusFileLoc = pathjoin(FullRFCDir, "ietf-rfc-status.pickle")
 
 # The "ietf" command can be called with no arguments to go to the internal command processor
 #    It is often called as "ietf" with arguments from the KnownCommand list.
