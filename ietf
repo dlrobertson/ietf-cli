@@ -44,7 +44,7 @@ __license__ = "http://en.wikipedia.org/wiki/WTFPL"
 ##########
 
 KnownCmds = ("auth48", "bcp", "charter", "diff", "draft", "mirror", "rfc", "tools", "tracker")
-ConfigPlaces = ("~/bin/ietf.config", "/usr/local/bin/ietf.config", "/etc", "~/.ietf")
+ConfigPlaces = ("~/bin/ietf.config", "/usr/local/bin/ietf.config", "~/.ietf", "/etc/ietf.config")
 WasPublishedPatt = compile(r"was\s*published")
 NewRequestPatt = compile(r"new\s*Request\s*for\s*Comments")
 HasExpiredPatt = compile(r"has\s*expired")
@@ -421,11 +421,11 @@ def Cmd_mirror(Args):
 	else:
 		AllActions = [
 			[ "Internet Drafts", "rsync -avz --exclude='*.xml' --exclude='*.pdf' --exclude='*.p7s' " +
-				" --exclude='*.ps' --delete-after  www.ietf.org::internet-drafts " + IDDir ],
-			[ "IANA", "rsync -avz --delete-after  www.ietf.org::everything-ftp/iana/ " + IANADir ],
-			[ "IESG", "rsync -avz --delete-after  www.ietf.org::everything-ftp/iesg/ " + IESGDir ],
+				" --exclude='*.ps' --delete-after  rsync.ietf.org::internet-drafts " + IDDir ],
+			[ "IANA", "rsync -avz --delete-after  rsync.ietf.org::everything-ftp/iana/ " + IANADir ],
+			[ "IESG", "rsync -avz --delete-after  rsync.ietf.org::iesg-minutes/ " + IESGDir ],
 			[ "IETF", "rsync -avz --delete-after  --exclude='ipr/' " +
-				"www.ietf.org::everything-ftp/ietf/ " + IETFDir ],
+				"rsync.ietf.org::everything-ftp/ietf/ " + IETFDir ],
 			[ "RFCs", "rsync -avz --delete-after " +
 				" --exclude='tar*' --exclude='search*' --exclude='PDF-RFC*' " +
 				" --exclude='tst/' --exclude='pdfrfc/' --exclude='internet-drafts/' " +
@@ -534,7 +534,7 @@ def Cmd_rfc(Args):
 		return
 	# Open the status database before going through the arguments
 	try:
-		with open(RFCStatusFileLoc, mode="r") as statusf:
+		with open(RFCStatusFileLoc, mode="rb") as statusf:
 			RFCStatusDB = pickleload(statusf)
 	except:
 		exit("Weird: could not get data from the RFC status database, '" + RFCStatusFileLoc + "'. Exiting.")
@@ -639,8 +639,14 @@ for ThisPlace in ConfigPlaces:
 	if pathexists(expanduser(ThisPlace)):
 		ConfigFile = ThisPlace
 		break
-if ConfigFile == "":
-	exit("Could not find a configuration file in " + " or ".join(ConfigPlaces) + "\nExiting.")
+else:
+	exit("".join([
+		"Could not find a configuration file in ",
+		", ".join(ConfigPlaces[:-1]),
+		" or ",
+		ConfigPlaces[-1],
+		"\nExiting."
+	]))
 
 # Get the variable names for the directories and display mechanisms
 try:
